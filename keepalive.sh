@@ -3,6 +3,26 @@
 installpath="$HOME"
 source ${installpath}/serv00-play/utils.sh
 
+LOCKFILE="$installpath/serv00-play/.keepalive.lock"
+
+# 检查是否已经有一个实例在运行
+if [ -e "$LOCKFILE" ]; then
+  echo "另一个实例正在运行，退出..."
+  exit 1
+fi
+
+# 创建锁文件
+touch "$LOCKFILE"
+
+# 定义清理函数
+cleanup() {
+  rm -f "$LOCKFILE"
+  exit
+}
+
+# 捕获脚本退出信号并调用清理函数
+trap cleanup INT TERM EXIT
+
 autoUp=$1
 sendtype=$2
 TELEGRAM_TOKEN="$3"
@@ -106,6 +126,7 @@ startNeZhaAgent() {
   nezha_domain=$(jq -r ".nezha_domain" $config)
   nezha_port=$(jq -r ".nezha_port" $config)
   nezha_pwd=$(jq -r ".nezha_pwd" $config)
+  ver=$(jq -r ".version" $config)
   tls=$(jq -r ".tls" $config)
 
   if checknezhaAgentAlive; then
@@ -117,7 +138,18 @@ startNeZhaAgent() {
     args="${args} --tls "
   fi
 
-  nohup ./nezha-agent ${args} -s "${nezha_domain}:${nezha_port}" -p "${nezha_pwd}" >/dev/null 2>&1 &
+  if [[ "$ver" == "1" ]]; then
+    nohup ./nezha-agent ${args} -s "${nezha_domain}:${nezha_port}" -p "${nezha_pwd}" >/dev/null 2>&1 &
+  else
+    local yamlcfg="config.yaml"
+    local datatls=""
+    if [[ "$tls" == "y" ]]; then
+      datatls="tls: true"
+    else
+      datatls="tls: false"
+    fi
+    nohup ./nezha-agent -c $yamlcfg 2>&1 &
+  fi
 
 }
 
@@ -135,6 +167,20 @@ startMtg() {
     echo "启动成功"
   else
     echo "启动失败，请检查进程"
+  fi
+
+}
+
+startNeZhaDashboard() {
+  cd ${installpath}/serv00-play/nezha-board
+  if checkProcAlive nezha-dashboard; then
+    stopNeZhaDashboard
+  fi
+  nohup ./nezha-dashboard -c config.yaml >borad.log 2>&1 &
+  if checkProcAlive nezha-dashboard; then
+    green "面板已启动!"
+  else
+    red "面板启动失败,请查看日志borad.log"
   fi
 
 }
@@ -175,7 +221,7 @@ startSunPanel() {
 startWebSSH() {
   cd ${installpath}/serv00-play/webssh
   ssh_port=$(jq -r ".port" config.json)
-  cmd="nohup ./wssh --port=$ssh_port  --fbidhttp=False --xheaders=False --encoding='utf-8' --delay=10  >/dev/null 2>&1 &"
+  cmd="nohup ./wssh --port=$ssh_port  --fbidhttp=False --wpintvl=30 --xheaders=False --encoding='utf-8' --delay=10  >/dev/null 2>&1 &"
   eval "$cmd"
 }
 
@@ -197,7 +243,7 @@ if [[ -n "$autoUp" ]]; then
 fi
 if [ ! -f config.json ]; then
   echo "未配置保活项目，请先行配置!"
-  exit 0
+  cleanup
 fi
 
 monitor=($(jq -r ".item[]" config.json))
@@ -206,7 +252,9 @@ tg_token=$(jq -r ".telegram_token // empty" config.json)
 
 if [[ -z "$tg_token" ]]; then
   echo "从msg.json获取 telegram_token"
-  TELEGRAM_TOKEN=$(jq -r '.telegram_token // empty' msg.json)
+  if [[ -e "msg.json" ]]; then
+    TELEGRAM_TOKEN=$(jq -r '.telegram_token // empty' msg.json)
+  fi
 else
   TELEGRAM_TOKEN=$tg_token
 fi
@@ -245,12 +293,16 @@ fi
 
 if [ -z "$BUTTON_URL" ]; then
   echo "从msg.json获取 button_url"
-  BUTTON_URL=$(jq -r ".button_url // empty" msg.json)
+  if [[ -e "msg.json" ]]; then
+    BUTTON_URL=$(jq -r ".button_url // empty" msg.json)
+  fi
 fi
 
 if [ -z "$PASS" ]; then
   echo "从msg.json获取 password"
-  PASS=$(jq -r ".password // empty" msg.json)
+  if [[ -e "msg.json" ]]; then
+    PASS=$(jq -r ".password // empty" msg.json)
+  fi
 fi
 
 export TELEGRAM_TOKEN TELEGRAM_USERID WXSENDKEY sendtype BUTTON_URL PASS
@@ -315,6 +367,17 @@ for obj in "${monitor[@]}"; do
         msg="nezha-agent 重启成功."
       fi
     fi
+  elif [ "$obj" == "nezha-dashboard" ]; then
+    if ! checkProcAlive "nezha-dashboard"; then
+      cd ${installpath}/serv00-play/nezha-board
+      startNeZhaDashboard
+      sleep 1
+      if ! checkProcAlive "nezha-dashboard"; then
+        msg="nezha-dashboard 重启失败."
+      else
+        msg="nezha-dashboard 重启成功."
+      fi
+    fi
   elif [ "$obj" == "mtg" ]; then
     if ! checkMtgAlive; then
       cd ${installpath}/serv00-play/dmtg
@@ -365,3 +428,6 @@ if [[ "$autoUpdateHyIP" == "Y" ]]; then
 fi
 
 devil info account &>/dev/null
+
+# 清理锁文件
+cleanup
